@@ -126,6 +126,30 @@ subprocess.run(["swapon", swap_part], check=True)
 # ----------------------------------------------------------------------
 print("\n[4/5] Generating NixOS hardware configuration...")
 subprocess.run(["nixos-generate-config", "--root", "/mnt"], check=True)
+# ----------------------------------------------------------------------
+# Step 5b: Inject Bootloader Configuration
+# ----------------------------------------------------------------------
+print("\nConfiguring systemd-boot for UEFI...")
+
+bootloader_config = """
+  # Enable systemd-boot UEFI bootloader
+  boot.loader.systemd-boot.enable = true;
+  boot.loader.efi.canTouchEfiVariables = true;
+"""
+
+config_path = "/mnt/etc/nixos/configuration.nix"
+
+# Append bootloader config right before the closing brace of configuration.nix
+with open(config_path, "r") as f:
+    content = f.read()
+
+# Replace the closing brace with the bootloader options and re-close the attribute set
+if "boot.loader.systemd-boot.enable" not in content:
+    content = content.rstrip()
+    if content.endswith("}"):
+        content = content[:-1] + bootloader_config + "\n}\n"
+    with open(config_path, "w") as f:
+        f.write(content)
 
 # ----------------------------------------------------------------------
 # Step 6: Performing the Installation
