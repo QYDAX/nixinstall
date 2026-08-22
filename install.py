@@ -1,4 +1,5 @@
 import os
+import sys
 import subprocess
 
 def select_target_disk():
@@ -9,11 +10,16 @@ def select_target_disk():
         ["lsblk", "-dno", "NAME,SIZE,TYPE"],
         capture_output=True,
         text=True,
+        check=True
     )
     
     # Strip whitespace and filter out zram, loop, and non-disk types
     lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
     disks = [line for line in lines if "disk" in line and "zram" not in line and "loop" not in line]
+
+    if not disks:
+        print("Error: No suitable target disks found!")
+        sys.exit(1)
 
     disk_list = []
 
@@ -36,7 +42,7 @@ def select_target_disk():
                 selected_disk = disk_list[choice]
                 break
             else:
-                print("Invalid number.")
+                print("Invalid selection.")
 
         except ValueError:
             print("Please enter a number.")
@@ -49,23 +55,85 @@ def select_target_disk():
 
     if confirm.lower() != "y":
         print("Installation aborted.")
-        exit(1)
+        sys.exit(0)
 
     return selected_disk
 
 
-# Usage
+# ----------------------------------------------------------------------
+# Step 1: Disk Selection
+# ----------------------------------------------------------------------
 target_disk = select_target_disk()
-print(f"Installing onto: {target_disk}")
+print(f"\nInstalling onto: {target_disk}")
 
-subprocess.run(
-    ["parted", target_disk, "--", "mklabel", "gpt"]
-)
-subprocess.run(
-    ["parted", target_disk, "--", "mkpart", "ext4", "512MB", "-8GB"]
-)
-print ("Done.")
+# Determine device node names for partitions (handles /dev/nvme0n1p1 vs /dev/sda1)
+part_prefix = "p" if "nvme" in target_disk or "mmcblk" in target_disk else ""
+boot_part = f"{target_disk}{part_prefix}1"
+root_part = f"{target_disk}{part_prefix}2"
+swap_part = f"{target_disk}{part_prefix}3"
 
+# ----------------------------------------------------------------------
+# Step 2: Partitioning (UEFI / GPT Scheme)
+# ----------------------------------------------------------------------
+print("\n[1/5] Partitioning disk with parted...")
+
+# Create GPT partition table
+subprocess.run(["parted", target_disk, "--", "mklabel", "gpt"], check=True)
+
+# Add ESP Boot partition (512MB)
+subprocess.run(["parted", target_disk, "--", "mkpart", "ESP", "fat32", "1MB", "512MB"], check=True)
+
+# Add Root partition (Fill disk except final 8GB)
+subprocess.run(["parted", target_disk, "--", "mkpart", "root", "ext4", "512MB", "-8GB"], check=True)
+
+# Add Swap partition (Final 8GB)
+subprocess.run(["parted", target_disk, "--", "mkpart", "swap", "linux-swap", "-8GB", "100%"], check=True)
+
+# Set ESP flag on Boot partition
+subprocess.run(["parted", target_disk, "--", "set", "1", "esp", "on"], check=True)
+
+# ----------------------------------------------------------------------
+# Step 3: Formatting
+# ----------------------------------------------------------------------
+print("\n[2/5] Formatting partitions...")
+
+# Format Root partition with ext4 and label 'nixos'
+subprocess.run(["mkfs.ext4", "-F", "-L", "nixos", root_part], check=True)
+
+# Initialize Swap partition with label 'swap'
+subprocess.run(["mkswap", "-L", "swap", swap_part], check=True)
+
+# Format Boot partition with FAT32 and label 'boot'
+subprocess.run(["mkfs.fat", "-F", "32", "-n", "boot", boot_part], check=True)
+
+# ----------------------------------------------------------------------
+# Step 4: Mounting Filesystems
+# ----------------------------------------------------------------------
+print("\n[3/5] Mounting target filesystems...")
+
+# Mount root to /mnt
+subprocess.run(["mount", "/dev/disk/by-label/nixos", "/mnt"], check=True)
+
+# Create /mnt/boot and mount EFI boot partition
+os.makedirs("/mnt/boot", exist_ok=True)
+subprocess.run(["mount", "-o", "umask=077", "/dev/disk/by-label/boot", "/mnt/boot"], check=True)
+
+# Activate Swap
+subprocess.run(["swapon", swap_part], check=True)
+
+# ----------------------------------------------------------------------
+# Step 5: Generating Initial NixOS Configuration
+# ----------------------------------------------------------------------
+print("\n[4/5] Generating NixOS hardware configuration...")
+subprocess.run(["nixos-generate-config", "--root", "/mnt"], check=True)
+
+# ----------------------------------------------------------------------
+# Step 6: Performing the Installation
+# ----------------------------------------------------------------------
+print("\n[5/5] Running nixos-install...")
+subprocess.run(["nixos-install"], check=True)
+
+print("\nInstallation Complete! You can now type 'reboot'.")
 
 
 
