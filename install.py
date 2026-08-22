@@ -122,10 +122,34 @@ subprocess.run(["mount", "-o", "umask=077", "/dev/disk/by-label/boot", "/mnt/boo
 subprocess.run(["swapon", swap_part], check=True)
 
 # ----------------------------------------------------------------------
-# Step 5: Generating Initial NixOS Configuration
+# Step 5: Generating and Writing NixOS Configuration
 # ----------------------------------------------------------------------
 print("\n[4/5] Generating NixOS hardware configuration...")
 subprocess.run(["nixos-generate-config", "--root", "/mnt"], check=True)
+
+print("Writing /mnt/etc/nixos/configuration.nix...")
+nixos_config = """{ config, pkgs, ... }:
+
+{
+  imports = [
+    ./hardware-configuration.nix
+  ];
+
+  # Enable systemd-boot for UEFI
+  boot.loader.systemd-boot.enable = true;
+  boot.loader.efi.canTouchEfiVariables = true;
+
+  networking.hostName = "nixos";
+  networking.networkmanager.enable = true;
+
+  time.timeZone = "UTC";
+
+  system.stateVersion = "24.05";
+}
+"""
+
+with open("/mnt/etc/nixos/configuration.nix", "w") as f:
+    f.write(nixos_config)
 # ----------------------------------------------------------------------
 # Step 5b: Inject Bootloader Configuration
 # ----------------------------------------------------------------------
@@ -158,6 +182,5 @@ print("\n[5/5] Running nixos-install...")
 subprocess.run(["nixos-install"], check=True)
 
 print("\nInstallation Complete! You can now type 'reboot'.")
-
 
 
