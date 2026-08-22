@@ -8,17 +8,19 @@ def select_target_disk():
     result = subprocess.run(
         ["lsblk", "-dno", "NAME,SIZE,TYPE"],
         capture_output=True,
-        text=True
+        text=True,
     )
-
-    # Filter only disk-type devices
-    lines = result.stdout.strip().split("\n")
-    disks = [line for line in lines if "disk" in line]
+    
+    # Strip whitespace and filter out zram, loop, and non-disk types
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    disks = [line for line in lines if "disk" in line and "zram" not in line and "loop" not in line]
 
     disk_list = []
 
     for idx, line in enumerate(disks, 1):
-        name, size, _ = line.split()
+        parts = line.split()
+        name = parts[0]
+        size = parts[1]
         full_path = f"/dev/{name}"
         disk_list.append(full_path)
         print(f"[{idx}] {full_path} ({size})")
@@ -63,6 +65,7 @@ subprocess.run(
     ["parted", target_disk, "--", "mkpart", "ext4", "512MB", "-8GB"]
 )
 print ("Done.")
+
 
 
 
