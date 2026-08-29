@@ -8,8 +8,13 @@ import shutil
 import socket
 import subprocess
 import sys
+import secrets
+import string
 from pathlib import Path
 
+# Try using system libcrypt via ctypes to avoid needing external binaries like openssl
+import ctypes
+import ctypes.util
 
 NIXOS_STATE_VERSION = "25.11"
 MIN_DISK_GB = 16
@@ -42,9 +47,6 @@ def check_required_commands():
         "git",
         "cp",
         "findmnt",
-        "partprobe",
-        "udevadm",
-        "openssl",
     ]
 
     missing = [cmd for cmd in required if not command_exists(cmd)]
@@ -196,24 +198,39 @@ def get_password():
 
 def hash_password(password):
     """
-    Generate a SHA-512 password hash using openssl.
-
-    The plaintext password is never written to configuration.nix.
+    Generate a SHA-512 password hash using system C libraries (libcrypt).
+    Fallback to nix-shell with openssl if available.
     """
+    # Create SHA-512 salt: $6$rounds=5000$saltstring$
+    alphabet = string.ascii_letters + string.digits + "./"
+    salt_str = "".join(secrets.choice(alphabet) for _ in range(16))
+    setting = f"$6${salt_str}"
 
     try:
+        libcrypt_path = ctypes.util.find_library("crypt")
+        if libcrypt_path:
+            libcrypt = ctypes.CDLL(libcrypt_path)
+            libcrypt.crypt.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+            libcrypt.crypt.restype = ctypes.c_char_p
+            hashed = libcrypt.crypt(password.encode("utf-8"), setting.encode("utf-8"))
+            if hashed:
+                return hashed.decode("utf-8")
+    except Exception:
+        pass
+
+    # Fallback to nix-shell wrapper if openssl is missing from live ISO environment path
+    try:
         result = subprocess.run(
-            ["openssl", "passwd", "-6", "-stdin"],
+            ["nix-shell", "-p", "openssl", "--run", f"openssl passwd -6 -stdin"],
             input=password,
             text=True,
             capture_output=True,
             check=True,
         )
-    except FileNotFoundError:
-        print("[ERROR] openssl is required to hash the password.")
+        return result.stdout.strip()
+    except Exception:
+        print("[ERROR] Unable to generate SHA-512 password hash.")
         sys.exit(1)
-
-    return result.stdout.strip()
 
 
 def disk_size_bytes(device):
@@ -1057,5 +1074,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
