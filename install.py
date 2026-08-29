@@ -39,13 +39,16 @@ def check_required_commands():
     required = [
         "lsblk",
         "parted",
+        "partprobe",
         "mkfs.ext4",
         "mkfs.fat",
         "mount",
+        "umount",
         "nixos-generate-config",
         "nixos-install",
+        "nixos-rebuild",
+        "nixos-enter",
         "git",
-        "cp",
         "findmnt",
     ]
 
@@ -70,7 +73,12 @@ def check_uefi():
 
 
 def check_network():
-    """Check basic network connectivity."""
+    """Check basic network connectivity.
+
+    Some networks/firewalls drop ICMP even though outbound HTTPS works
+    fine, so a plain ping can produce a false negative. Fall back to a
+    raw TCP connect on port 443 before giving up.
+    """
 
     print("\n--> Checking network connectivity...")
 
@@ -81,10 +89,19 @@ def check_network():
             stderr=subprocess.DEVNULL,
             check=True,
         )
+        return
     except (subprocess.CalledProcessError, FileNotFoundError):
-        print("[ERROR] Network connectivity check failed.")
-        print("An Internet connection is required for this installer.")
-        sys.exit(1)
+        pass
+
+    try:
+        with socket.create_connection(("github.com", 443), timeout=5):
+            return
+    except OSError:
+        pass
+
+    print("[ERROR] Network connectivity check failed.")
+    print("An Internet connection is required for this installer.")
+    sys.exit(1)
 
 
 def get_nix_system():
@@ -142,7 +159,10 @@ def get_username():
             print("Username is too long.")
             continue
 
-        if not re.fullmatch(r"[a-z_][a-z0-9_-]*[$]?", username):
+        # Interactive login accounts shouldn't end in '$' (that's a
+        # convention for machine/service accounts), so it's dropped
+        # from the allowed pattern.
+        if not re.fullmatch(r"[a-z_][a-z0-9_-]*", username):
             print(
                 "Invalid username. Use lowercase letters, numbers, "
                 "underscores, and hyphens."
@@ -170,6 +190,7 @@ def get_username():
             "gnats",
             "systemd-network",
             "systemd-resolve",
+            "nixbld",
         }:
             print("That username is reserved.")
             continue
@@ -201,27 +222,38 @@ def hash_password(password):
     Generate a SHA-512 password hash using system C libraries (libcrypt).
     Fallback to nix-shell with openssl if available.
     """
-    # Create SHA-512 salt: $6$rounds=5000$saltstring$
+    # Create SHA-512 salt: $6$saltstring$
     alphabet = string.ascii_letters + string.digits + "./"
     salt_str = "".join(secrets.choice(alphabet) for _ in range(16))
     setting = f"$6${salt_str}"
 
-    try:
-        libcrypt_path = ctypes.util.find_library("crypt")
-        if libcrypt_path:
-            libcrypt = ctypes.CDLL(libcrypt_path)
+    # ctypes.util.find_library() relies on ldconfig's cache, which
+    # frequently isn't populated the way it expects on the NixOS live
+    # ISO. Try a handful of common SONAMEs directly before giving up
+    # on the libcrypt route entirely.
+    candidate_libs = []
+    found = ctypes.util.find_library("crypt")
+    if found:
+        candidate_libs.append(found)
+    candidate_libs += ["libcrypt.so.2", "libcrypt.so.1", "libcrypt.so"]
+
+    for lib_name in candidate_libs:
+        try:
+            libcrypt = ctypes.CDLL(lib_name)
             libcrypt.crypt.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
             libcrypt.crypt.restype = ctypes.c_char_p
             hashed = libcrypt.crypt(password.encode("utf-8"), setting.encode("utf-8"))
             if hashed:
                 return hashed.decode("utf-8")
-    except Exception:
-        pass
+        except OSError:
+            continue
+        except Exception:
+            continue
 
-    # Fallback to nix-shell wrapper if openssl is missing from live ISO environment path
+    # Fallback to nix-shell wrapper if libcrypt is unreachable via ctypes.
     try:
         result = subprocess.run(
-            ["nix-shell", "-p", "openssl", "--run", f"openssl passwd -6 -stdin"],
+            ["nix-shell", "-p", "openssl", "--run", "openssl passwd -6 -stdin"],
             input=password,
             text=True,
             capture_output=True,
@@ -570,6 +602,27 @@ def create_desktop_configuration(
     swaync
   ];
 """
+        elif not command_exists("nix"):
+            # The flake build path needs a working `nix` CLI with
+            # experimental features. If it's not available, degrade
+            # gracefully instead of failing deep into the install.
+            print(
+                "\n[WARNING] The 'nix' command is unavailable, so the "
+                "Caelestia flake build cannot proceed."
+            )
+            print("Falling back to standard Hyprland.")
+
+            desktop_snippet = """
+  programs.hyprland.enable = true;
+  programs.hyprland.xwayland.enable = true;
+
+  environment.systemPackages = with pkgs; [
+    kitty
+    waybar
+    rofi-wayland
+    swaync
+  ];
+"""
 
         else:
             is_flake_build = True
@@ -754,13 +807,21 @@ def install_linux_beginnings(username):
     """
     Clone the current Linux Beginnings NixOS repository into the
     user's home directory.
+
+    This must run AFTER nixos-install, once the target system has
+    actually created the user account and /home/<user> (the live ISO
+    has no such user or directory, so cloning/chowning earlier would
+    fail).
     """
 
     print("\n--> Preparing Linux Beginnings configuration...")
 
-    target_dir = Path(
-        f"/mnt/home/{username}/NixOS-Hyprland"
-    )
+    home_dir = Path(f"/mnt/home/{username}")
+    target_dir = home_dir / "NixOS-Hyprland"
+
+    # Safety net in case activation hasn't created the home directory
+    # for some reason.
+    home_dir.mkdir(parents=True, exist_ok=True)
 
     if target_dir.exists():
         shutil.rmtree(target_dir)
@@ -776,13 +837,16 @@ def install_linux_beginnings(username):
         ]
     )
 
-    # Fix ownership.
+    # Fix ownership from *inside* the installed target, since the
+    # username only exists in /mnt's passwd database, not the live
+    # ISO's.
     run_command(
         [
-            "chown",
-            "-R",
-            f"{username}:{username}",
-            str(target_dir),
+            "nixos-enter",
+            "--root",
+            "/mnt",
+            "-c",
+            f"chown -R {username}:{username} /home/{username}/NixOS-Hyprland",
         ]
     )
 
@@ -856,7 +920,7 @@ def verify_configuration(is_flake_build, hostname):
             [
                 "nix",
                 "eval",
-                f"/mnt/etc/nixos#{hostname}.config.system.build.toplevel",
+                f"/mnt/etc/nixos#nixosConfigurations.{hostname}.config.system.build.toplevel",
                 "--raw",
             ]
         )
@@ -952,34 +1016,31 @@ def main():
     )
 
     # ------------------------------------------------------------
-    # Partitioning
+    # Everything from here on touches the target disk/filesystem, so
+    # it all needs to go through the same cleanup path on failure.
     # ------------------------------------------------------------
-
-    partition_disk(target_disk)
-
-    boot_part, root_part = get_partition_paths(
-        target_disk
-    )
-
-    # ------------------------------------------------------------
-    # Formatting
-    # ------------------------------------------------------------
-
-    format_partitions(
-        boot_part,
-        root_part,
-    )
-
-    # ------------------------------------------------------------
-    # Mounting
-    # ------------------------------------------------------------
-
-    mount_filesystems(
-        boot_part,
-        root_part,
-    )
 
     try:
+        # --------------------------------------------------------
+        # Partitioning
+        # --------------------------------------------------------
+
+        partition_disk(target_disk)
+
+        boot_part, root_part = get_partition_paths(target_disk)
+
+        # --------------------------------------------------------
+        # Formatting
+        # --------------------------------------------------------
+
+        format_partitions(boot_part, root_part)
+
+        # --------------------------------------------------------
+        # Mounting
+        # --------------------------------------------------------
+
+        mount_filesystems(boot_part, root_part)
+
         # --------------------------------------------------------
         # Hardware configuration
         # --------------------------------------------------------
@@ -1018,12 +1079,15 @@ def main():
 
         write_flake(flake_content)
 
-        # --------------------------------------------------------
-        # Linux Beginnings
-        # --------------------------------------------------------
-
-        if desktop_choice == "6":
-            install_linux_beginnings(username)
+        if is_flake_build:
+            # The live ISO doesn't reliably have flakes enabled by
+            # default; make sure nix/nixos-install can use them
+            # without requiring the user to pass extra flags.
+            existing = os.environ.get("NIX_CONFIG", "")
+            addition = "experimental-features = nix-command flakes"
+            os.environ["NIX_CONFIG"] = (
+                f"{existing}\n{addition}" if existing else addition
+            )
 
         # --------------------------------------------------------
         # Validate configuration
@@ -1042,6 +1106,14 @@ def main():
             is_flake_build,
             hostname,
         )
+
+        # --------------------------------------------------------
+        # Linux Beginnings (must come after install: the target
+        # user/home only exist once nixos-install has run)
+        # --------------------------------------------------------
+
+        if desktop_choice == "6":
+            install_linux_beginnings(username)
 
         print("\n==========================================")
         print("       NixOS Installation Complete")
@@ -1066,6 +1138,15 @@ def main():
         print(
             "The target partitions have NOT been restored."
         )
+        sys.exit(1)
+
+    except Exception as error:
+        # Catches things like a missing binary (FileNotFoundError)
+        # or Ctrl-C, so the failure is reported cleanly instead of
+        # as a raw traceback.
+        print(f"\n[ERROR] Installation failed: {error}")
+        print("\nThe installation was stopped.")
+        print("The target partitions have NOT been restored.")
         sys.exit(1)
 
     finally:
