@@ -46,7 +46,6 @@ def check_required_commands():
         "umount",
         "nixos-generate-config",
         "nixos-install",
-        "nixos-rebuild",
         "nixos-enter",
         "git",
         "findmnt",
@@ -902,39 +901,40 @@ def write_flake(flake_content):
 
 
 def verify_configuration(is_flake_build, hostname):
-    """Run a NixOS configuration check before installation."""
+    """Run a NixOS configuration check before installation.
+
+    `nixos-rebuild` has no `--root` flag (that was a mistake in an
+    earlier version of this script), and there's no equivalent classic
+    invocation that builds a config rooted at /mnt without switching
+    the running system. Rather than fake a check that doesn't really
+    exist, this only pre-validates the flake path (where `nix eval`
+    can safely evaluate the config without touching anything). For the
+    non-flake path, `nixos-install` builds the configuration itself
+    and will report any errors just as clearly.
+    """
+
+    if not is_flake_build:
+        return
 
     print("\n--> Checking NixOS configuration...")
 
-    if is_flake_build:
-        run_command(
-            [
-                "nix",
-                "flake",
-                "check",
-                "/mnt/etc/nixos",
-            ]
-        )
+    run_command(
+        [
+            "nix",
+            "flake",
+            "check",
+            "/mnt/etc/nixos",
+        ]
+    )
 
-        run_command(
-            [
-                "nix",
-                "eval",
-                f"/mnt/etc/nixos#nixosConfigurations.{hostname}.config.system.build.toplevel",
-                "--raw",
-            ]
-        )
-
-    else:
-        run_command(
-            [
-                "nixos-rebuild",
-                "build",
-                "--no-link",
-                "--root",
-                "/mnt",
-            ]
-        )
+    run_command(
+        [
+            "nix",
+            "eval",
+            f"/mnt/etc/nixos#nixosConfigurations.{hostname}.config.system.build.toplevel",
+            "--raw",
+        ]
+    )
 
 
 def install_nixos(is_flake_build, hostname):
