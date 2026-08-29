@@ -42,6 +42,9 @@ def check_required_commands():
         "git",
         "cp",
         "findmnt",
+        "partprobe",
+        "udevadm",
+        "openssl",
     ]
 
     missing = [cmd for cmd in required if not command_exists(cmd)]
