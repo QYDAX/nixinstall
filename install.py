@@ -19,7 +19,6 @@ import ctypes.util
 NIXOS_STATE_VERSION = "25.11"
 MIN_DISK_GB = 16
 
-LB_REPO = "https://github.com/LinuxBeginnings/NixOS-Hyprland.git"
 CAELESTIA_SHELL_REPO = "github:caelestia-dots/shell"
 
 
@@ -550,6 +549,10 @@ def create_desktop_configuration(
         desktop_snippet,
         flake_content or None,
         is_flake_build
+
+    Note: `kitty` is installed for every option via the base
+    environment.systemPackages list in create_configuration(), so it
+    is intentionally NOT repeated in any of the snippets below.
     """
 
     desktop_snippet = ""
@@ -576,10 +579,6 @@ def create_desktop_configuration(
         desktop_snippet = """
   programs.hyprland.enable = true;
   programs.hyprland.xwayland.enable = true;
-
-  environment.systemPackages = with pkgs; [
-    kitty
-  ];
 """
 
     elif desktop == "4":
@@ -595,7 +594,6 @@ def create_desktop_configuration(
   programs.hyprland.xwayland.enable = true;
 
   environment.systemPackages = with pkgs; [
-    kitty
     waybar
     rofi-wayland
     swaync
@@ -616,7 +614,6 @@ def create_desktop_configuration(
   programs.hyprland.xwayland.enable = true;
 
   environment.systemPackages = with pkgs; [
-    kitty
     waybar
     rofi-wayland
     swaync
@@ -692,24 +689,14 @@ def create_desktop_configuration(
     waybar
     swaync
     rofi-wayland
-    kitty
   ];
 """
 
     elif desktop == "6":
+        # No desktop environment: console/TTY only. The base package
+        # set (git, curl, wget, kitty) is still installed.
         desktop_snippet = """
-  programs.hyprland.enable = true;
-  programs.hyprland.xwayland.enable = true;
-
-  environment.systemPackages = with pkgs; [
-    git
-    vim
-    curl
-    pciutils
-    waybar
-    rofi-wayland
-    kitty
-  ];
+  # No desktop environment selected - console/TTY only.
 """
 
     return desktop_snippet, flake_content, is_flake_build
@@ -728,7 +715,7 @@ def select_desktop(
     print("3. Hyprland (Stock)")
     print("4. Hyprland + Caelestia Shell")
     print("5. Hyprland + Waybar & Rofi Suite")
-    print("6. Hyprland + Linux Beginnings")
+    print("6. None (console only, no desktop environment)")
 
     while True:
         choice = input("\nEnter choice (1-6): ").strip()
@@ -790,75 +777,18 @@ def create_configuration(
 
 {desktop_snippet}
 
+  # Minimal base package set - kitty is installed regardless of
+  # desktop choice; no vim/nano/other bloat.
   environment.systemPackages = with pkgs; [
     git
     curl
     wget
-    vim
+    kitty
   ];
 
   system.stateVersion = "{NIXOS_STATE_VERSION}";
 }}
 """
-
-
-def install_linux_beginnings(username):
-    """
-    Clone the current Linux Beginnings NixOS repository into the
-    user's home directory.
-
-    This must run AFTER nixos-install, once the target system has
-    actually created the user account and /home/<user> (the live ISO
-    has no such user or directory, so cloning/chowning earlier would
-    fail).
-    """
-
-    print("\n--> Preparing Linux Beginnings configuration...")
-
-    home_dir = Path(f"/mnt/home/{username}")
-    target_dir = home_dir / "NixOS-Hyprland"
-
-    # Safety net in case activation hasn't created the home directory
-    # for some reason.
-    home_dir.mkdir(parents=True, exist_ok=True)
-
-    if target_dir.exists():
-        shutil.rmtree(target_dir)
-
-    run_command(
-        [
-            "git",
-            "clone",
-            "--depth",
-            "1",
-            LB_REPO,
-            str(target_dir),
-        ]
-    )
-
-    # Fix ownership from *inside* the installed target, since the
-    # username only exists in /mnt's passwd database, not the live
-    # ISO's.
-    run_command(
-        [
-            "nixos-enter",
-            "--root",
-            "/mnt",
-            "-c",
-            f"chown -R {username}:{username} /home/{username}/NixOS-Hyprland",
-        ]
-    )
-
-    print(
-        "\nLinux Beginnings has been cloned to:"
-        f"\n  /home/{username}/NixOS-Hyprland"
-    )
-
-    print(
-        "\nThe current Linux Beginnings repository does not ship "
-        "the desktop dotfiles directly in the repository, so this "
-        "installer does not pretend that copying .config will install them."
-    )
 
 
 def write_configuration(
@@ -1107,20 +1037,12 @@ def main():
             hostname,
         )
 
-        # --------------------------------------------------------
-        # Linux Beginnings (must come after install: the target
-        # user/home only exist once nixos-install has run)
-        # --------------------------------------------------------
-
-        if desktop_choice == "6":
-            install_linux_beginnings(username)
-
         print("\n==========================================")
         print("       NixOS Installation Complete")
         print("==========================================")
         print(f"Username : {username}")
         print(f"Hostname : {hostname}")
-        print("\nYou can now reboot into your new NixOS system.")
+        print("\nYou can reboot.")
 
     except subprocess.CalledProcessError as error:
         print(
